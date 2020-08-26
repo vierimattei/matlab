@@ -1,0 +1,263 @@
+%Experimenting with a user defined set of points to generate the mesh.
+msystemdim
+tic
+
+%For good meshes, use odd number for res, or result is really boxy
+%NOTE: To improve the quality of the sphere, it's best to take a bigger
+%initial cube (increase leng by a factor n) and increase the resolution accordingly (same
+%factor n for res). By doing so, we can avoid the straight surfaces ad the
+%6 edges of the sphere! Also, best to use res approx = 10*leng multiplier,
+%so e.g. leng = 3*domainsize -> res=29 (odd number).
+res=29;
+leng=3*domainsize;
+
+
+%Defining the # of and distance between the points in each direction
+xout = linspace(-leng,leng,res);
+yout=xout;
+zout=xout;
+
+%Prealloacating the array for the vertices
+vertsout = zeros(3,size(xout,2)^3);
+
+%Setting dummy variable n=0 before loop. Formatting the coordinates in
+%x,y,z into what needed for triangulation
+
+n=0;
+for i = 1:size(xout,2)
+    for j = 1:size(yout,2)
+        for k = 1:size(zout,2)
+            n = n+1;
+            vertsout(:,n) = [xout(i); yout(j); zout(k)];
+        end
+    end
+end
+
+%Determining the radius of each vertex
+trad = sqrt(vertsout(1,:).^2 + vertsout(2,:).^2 + vertsout(3,:).^2);
+
+%Radius w.r.t. displaced source
+%tradisp = sqrt((verts(1,:)-sourceloc().^2 + verts(2,:).^2 + verts(3,:).^2);
+
+%Maximum value of vertices in initial cube for scaling
+tradmax = max(trad);
+
+% Discarding points beyond certain radius, so we get a sphere
+for m = 1 : size(vertsout,2)    
+    vertsout(:,m) = (trad(m)/max(trad))^(3/4)*vertsout(:,m); %making points closer to origin more dense
+    %Have to redefine the radius here after modifying it above or the
+    %cutoff radius will be incorrect!
+    trad(m) = sqrt(vertsout(1,m).^2 + vertsout(2,m).^2 + vertsout(3,m).^2);
+    
+    if trad(m) > domainsize & trad(m) <=  1.05*domainsize
+        vertsout(:,m) = vertsout(:,m) * domainsize/trad(m); %normalising rather than discarding points outisde sphere
+    
+    elseif trad(m) > 1.05*domainsize
+        vertsout(:,m) = zeros(3,1);
+    end
+end
+
+%For delaunayTriangulation we need to transpose to have the right format 
+vertsout = vertsout';
+
+%Eliminating the vertices that are repeated, since we're triangulating with
+%these points. This avoids the warning matlab throws about duplicate data
+%points.
+vertsout = unique(vertsout,'rows');
+
+%Defining the # of and distance between the points in each direction
+%Resolution of each sube around the source points
+indres = 5;
+
+%For each source, creating a cube of side radiustot*4, so to cover
+%approximately double the distance as the mass distribution. x,y,z are all
+%matrices of size sourcenum*indres, with indres the resolution for the mesh
+%around each source.
+
+finesize = 2*radiustot;
+
+xin = zeros(sourcenum, indres);
+yin = xin;
+zin = xin;
+
+for i = 1:sourcenum    
+
+xin(i,:) = linspace(sourceloc.x(i)-finesize, sourceloc.x(i) + finesize,indres);
+yin(i,:) = linspace(sourceloc.y(i)-finesize, sourceloc.y(i) + finesize,indres);
+zin(i,:) = linspace(sourceloc.z(i)-finesize, sourceloc.z(i) + finesize,indres);
+
+end
+
+%Prealloacating the array for the vertices. For each source we need an
+%independent list of vertices, hence verts is an array with sourcenum # of
+%3*size(x(1),2)^2 entries
+vertsin = zeros(sourcenum,3,size(xin(1),2)^3);
+
+%Setting dummy variable n=0 before loop. Formatting the coordinates in
+%x,y,z into what needed for triangulation
+
+n=0;
+for m = 1:sourcenum
+    for i = 1:size(xin,2)
+        for j = 1:size(yin,2)
+            for k = 1:size(zin,2)
+                n = n+1;
+                vertsin(m,:,n) = [xin(m,i); yin(m,j); zin(m,k)];
+            end
+        end
+    end
+end
+    
+tradin = zeros(sourcenum, size(vertsin,3));
+tradmaxin = zeros(sourcenum,1);
+
+for m = 1:sourcenum
+%Determining the distance of each vertex w.r.t each source
+tradin(m,:) = sqrt((vertsin(m,1,:)-sourceloc.x(m)).^2 + ...
+            (vertsin(m,2,:)-sourceloc.y(m)).^2 + ...
+            (vertsin(m,3,:)-sourceloc.z(m)).^2);
+
+%Maximum value of vertices in initial cube for scaling
+tradmaxin(m) = max(tradin(m,:));
+end
+
+% Discarding points beyond certain radius, so we get a sphere (doing it for
+% all source, indexed by m, otherwise same as for makemesh).
+for m = 1:sourcenum
+for i = 1 : size(vertsin,3)    
+    %Have to redefine the radius here after modifying it above or the
+    %cutoff radius will be incorrect!
+    tradin(m,:) = sqrt(((vertsin(m,1,i)-sourceloc.x(m)).^2 + ...
+            (vertsin(m,2,i)-sourceloc.y(m)).^2 + ...
+            (vertsin(m,3,i)-sourceloc.z(m)).^2));
+    
+    if tradin(m,i) > finesize & tradin(m,i) <=  1.05*finesize
+        vertsin(m,:,i) = vertsin(m,:,i) * finesize/tradin(m,i); %normalising rather than discarding points outisde sphere
+    
+    elseif tradin(m,i) > 1.05*finesize
+        vertsin(m,:,i) = zeros(1,3,1);
+    end
+end
+end
+
+%Cutting out from the coarse mesh the meshpoints that are inside the finer
+%mesh, that can cause bad elements.
+
+%Finding the distance to each source in the coarse mesh (tradrem)
+
+tradrem = zeros(size(vertsout,1), sourcenum);
+
+fprintf("Size of tradrem is %d... \n", size(tradrem));
+
+%Determining the radius of each vertex in the coarse mesh w.r.t each source
+for m = 1:sourcenum
+tradrem(:,m) = sqrt((vertsout(:,1)-sourceloc.x(m)).^2 + ...
+            (vertsout(:,2)-sourceloc.y(m)).^2 + ...
+            (vertsout(:,3)-sourceloc.z(m)).^2);
+end
+
+% Removing all points that are within the radius of any of the sources
+for m = 1:sourcenum
+for i = 1 : size(vertsout,1)    
+    
+    if tradrem(i,m) < 2*finesize
+        vertsout(i,:) = zeros(1,3);
+    end
+    
+end
+end
+
+%For delaunayTriangulation we need to transpose to have the right format 
+vertsin = permute(vertsin,[1 3 2]);
+vertsin = reshape(vertsin,sourcenum*size(vertsin,2),size(vertsin,3));
+
+
+%Eliminating the vertices that are repeated, since we're triangulating with
+%these points. This avoids the warning matlab throws about duplicate data
+%points.
+vertsin(isinf(vertsin)|isnan(vertsin))=0;
+vertsin = unique(vertsin,'rows');
+
+%For the overal mesh, we put together the points of the overall mesh
+%outside of the sources plus the mesh made for each source
+verts = [vertsin ; vertsout];
+verts = unique(verts,'rows');
+
+%Making the triangulation object tri
+tri = delaunayTriangulation(verts);
+
+
+%Obtaining the circumcenter of each element in the mesh + radius of
+%circumscribed sphere. Then transposing to have same format as for model,
+%and obtaining the volume of each sphere.
+[circent,cirrad] = circumcenter(tri);
+circent = circent';
+cirrad = cirrad';
+cirvol = 4*pi/3*cirrad.^3;
+
+%Same as above but with the incenter and inscribed sphere. 
+[incent,inrad] = incenter(tri);
+incent = incent';
+inrad = inrad';
+invol = 4*pi/3*inrad.^3;
+
+%Assigning the mesh points to verts
+vertsin = tri.Points;
+rads = sqrt(vertsin(:,1).^2 + vertsin(:,1).^2 + vertsin(:,3).^2);
+
+%# vertices
+nvert = size(vertsin,1);
+
+%Then, the 4xNe matrix of elements addressing the points. Same for
+%transposing
+
+telems = tri.ConnectivityList;
+%#elements
+
+nelems = size(telems,1);
+
+%Creating a PDE to test generating a geometry from the mesh just made
+tmodel = createpde(1);
+mymesh = geometryFromMesh(tmodel,vertsin',telems');
+
+%Assigning the mesh object to tmesh. Esed e.g. to find volume of each
+%element etc.
+tmesh = tmodel.Mesh;
+
+%Sorting the nodes and elements of the model
+[nodes,r,nodesort,rsort,elements,elsort] = sortelements(tmodel);
+
+%Defining the coordinates of the center of each inscribed circle to plot
+xin = incent(1,:);
+yin = incent(2,:);
+zin = incent(3,:);
+rin = sqrt(xin.^2+yin.^2+zin.^2); 
+
+%Using the meshQuality matlab command to find the quality of each element
+%in the mesh
+elqual = meshQuality(tmesh);
+    
+%Rearranging the positions of the incentered circles centers according to
+%their distance from the origin as usual
+[rins,elquals] = sortdist(rin,elqual);
+
+tickall = linspace(-domainsize,domainsize,41);
+labell = linspace(-domainsize/kp,domainsize/kp,41);
+
+%Plotting the geometry+mesh
+figure
+pdemesh(tmodel);
+xlabel('x (kpc)')
+ylabel('y (kpc)')
+zlabel('z (kpc)')
+xticks(tickall);
+yticks(tickall);
+zticks(tickall);
+xticklabels(labell);
+yticklabels(labell);
+zticklabels(labell);
+axis on
+box on
+
+meshtime = toc;
+fprintf('Generating mesh took %e s, for %d nodes and %d elements. \n',meshtime,nvert,nelems);
